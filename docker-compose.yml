@@ -1,0 +1,12 @@
+services:
+  telemetry-stash:
+    build: .
+    container_name: telemetry-stash
+    ports:
+      - "3301:3301"
+    environment:
+      - TELEMETRY_PORT=3301
+      - TELEMETRY_STORAGE_DIR=/data/telemetry
+    volumes:
+      - ./telemetry-storage:/data/telemetry
+    restart: unless-stopped
