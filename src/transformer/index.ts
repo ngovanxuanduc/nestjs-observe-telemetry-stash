@@ -30,7 +30,10 @@ export function transformToOtlp(payload: any) {
         const traceIdHex = toHex(snapshot.ti, 32);
         const calledAtStr =
           snapshot.c || snapshot.ct || new Date().toISOString();
-        const baseNs = BigInt(new Date(calledAtStr).getTime()) * 1000000n;
+        const timeMs = new Date(calledAtStr).getTime();
+        const safeTimeMs = Number.isNaN(timeMs) ? Date.now() : timeMs;
+        const baseNs = BigInt(safeTimeMs) * 1000000n;
+
         const snapshotAttr = snapshot._isJob
           ? {
               queueName: snapshot.q,
@@ -123,6 +126,26 @@ export function transformToOtlp(payload: any) {
         metricsList.push(
           buildGaugeMetric(name, cm.v?.default || cm.v || 0, nowNs),
         );
+      if (cm.t === "summary") {
+        if (cm.q50?.default !== undefined)
+          metricsList.push(
+            buildGaugeMetric(`${name}.p50`, cm.q50.default, nowNs),
+          );
+        if (cm.q95?.default !== undefined)
+          metricsList.push(
+            buildGaugeMetric(`${name}.p95`, cm.q95.default, nowNs),
+          );
+        if (cm.q99?.default !== undefined)
+          metricsList.push(
+            buildGaugeMetric(`${name}.p99`, cm.q99.default, nowNs),
+          );
+        if (cm.sm?.default !== undefined)
+          metricsList.push(buildSumMetric(`${name}.sum`, cm.sm.default, nowNs));
+        if (cm.ct?.default !== undefined)
+          metricsList.push(
+            buildSumMetric(`${name}.count`, cm.ct.default, nowNs),
+          );
+      }
     }
   }
 

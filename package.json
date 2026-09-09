@@ -1,12 +1,23 @@
 {
-    "name": "nestjs-observe-telemetry-stash",
-    "version": "1.0.0",
+    "name": "@ducnvx/nestjs-observe-telemetry-stash",
+    "version": "1.0.1",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/ngovanxuanduc/nestjs-observe-telemetry-stash.git"
+    },
+    "bugs": {
+        "url": "https://github.com/ngovanxuanduc/nestjs-observe-telemetry-stash/issues"
+    },
+    "homepage": "https://github.com/ngovanxuanduc/nestjs-observe-telemetry-stash#readme",
     "description": "Local Gzip File Sink & Offline Stash for NestJS Observe Telemetry",
     "main": "dist/src/index.js",
     "types": "dist/src/index.d.ts",
     "bin": {
         "telemetry-stash-replay": "dist/bin/replay-cli.js"
     },
+    "files": [
+        "dist"
+    ],
     "scripts": {
         "build": "tsc",
         "prepublishOnly": "npm run build"

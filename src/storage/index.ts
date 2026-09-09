@@ -1,2 +1,2 @@
-export * from "./raw.writer.js";
+export * from "./async.writer.js";
 export * from "./readable.writer.js";

@@ -14,5 +14,16 @@ export function writeReadablePayload(
   }
 
   const filePath = path.join(dirPath, `readable-${type}.jsonl`);
-  fs.appendFileSync(filePath, JSON.stringify(otlpPayload) + "\n", "utf-8");
+  fs.appendFile(
+    filePath,
+    JSON.stringify(otlpPayload) + "\n",
+    "utf-8",
+    (err) => {
+      if (err)
+        console.error(
+          `❌ [Telemetry Stash] Failed to write readable ${type}:`,
+          err,
+        );
+    },
+  );
 }

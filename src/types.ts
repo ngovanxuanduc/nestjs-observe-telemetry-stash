@@ -7,6 +7,12 @@ export interface StashOptions {
   raw?: boolean;
   /** Convert OTLP JSON và lưu .jsonl thô để debug (Mặc định: false) */
   readable?: boolean;
+  /** Giới hạn số lượng payload chờ ghi trong RAM (Mặc định: 1000) */
+  maxQueueSize?: number;
+  /** Giới hạn dung lượng HTTP request body (Mặc định: 10MB) */
+  maxBodySize?: number;
+  /** Dung lượng tối đa của 1 file segment nén (Mặc định: 10MB = 10 * 1024 * 1024 bytes) */
+  maxSegmentSizeBytes?: number;
 }
 
 export interface ReplayOptions {

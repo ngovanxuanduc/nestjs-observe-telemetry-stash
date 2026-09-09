@@ -12,7 +12,6 @@ export function configureStash(options: StashOptions) {
   return startCollectorServer();
 }
 
-// 💡 Hoãn auto-start sang tick tiếp theo để chờ configureStash() chạy xong
 process.nextTick(() => {
   if (!isConfigured) {
     startCollectorServer();
