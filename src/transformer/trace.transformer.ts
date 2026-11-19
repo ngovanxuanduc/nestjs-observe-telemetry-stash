@@ -242,8 +242,9 @@ export function buildJobSpans(job: any, fallbackTimeMs: number): any[] {
   const startMs = parseTimeMs(job.c) ?? parseTimeMs(job.ct) ?? fallbackTimeMs;
   const baseNs = msToNs(startMs);
   const endNs = baseNs + msToNs(Number(job.d) || 0);
-  // Job enqueue từ request dùng chung traceId với request → seed thêm job id.
-  const seed = `job:${job.ti}:${job.i ?? ""}`;
+  // Nhiều job chung traceId (job enqueue từ request / job khác), và mỗi lần retry của cùng
+  // một job cũng chung id + traceId → seed thêm queue, tên, số lần thử và thời điểm chạy.
+  const seed = `job:${job.ti}|${job.q ?? ""}|${job.n ?? ""}|${job.i ?? ""}|${job.am ?? ""}|${job.c ?? ""}`;
   const rootId = syntheticSpanId(seed);
 
   const attributes: OtlpAttribute[] = [];
@@ -253,7 +254,11 @@ export function buildJobSpans(job: any, fallbackTimeMs: number): any[] {
   pushAttr(attributes, "job.name", job.n);
   pushAttr(attributes, "job.status", job.s);
   pushAttr(attributes, "job.enqueued_at", job.ea);
+  // wd của Observe = chờ SAU khi hết delay/backoff (startedAt - (timestamp + delay)).
   pushAttr(attributes, "job.wait_ms", job.wd);
+  // Tổng thời gian từ lúc enqueue tới lúc chạy, gồm cả delay/backoff.
+  const enqueuedMs = parseTimeMs(job.ea);
+  if (enqueuedMs !== undefined) pushAttr(attributes, "job.queued_ms", Math.max(0, startMs - enqueuedMs));
   pushAttr(attributes, "job.attempts", job.am);
   pushAttr(attributes, "job.max_attempts", job.ma);
   pushAttrs(attributes, job.tg);
