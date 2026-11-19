@@ -86,6 +86,19 @@ Image build cho amd64 từ máy ARM: `docker buildx build --platform linux/amd64
 
 Credential S3 theo chuỗi mặc định của AWS SDK: ECS task role, `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, `~/.aws`.
 
+### Instance & role
+
+Payload của Observe không cho biết process nào gửi, nên stash tự gắn (`_source` trong file thô → resource `service.instance.id`, `observe.roles`, `observe.source.ip`):
+
+- **instance**: `/i/<tên>` trên endpoint (nếu app tự đặt) → **tên container** (DNS nội bộ Docker tra ngược từ IP, ổn định qua restart) → IP → gửi qua loopback (sidecar / in-process) thì là `TELEMETRY_INSTANCE_ID` của stash.
+- **roles**: app gắn `/r/<role1,role2>` vào endpoint của Observe — Observe gửi tới `<endpoint>/applications/telemetry` nên đường dẫn đi kèm mọi batch:
+  ```ts
+  ObserveModule.forRoot({ endpoint: `http://telemetry-stash:3301/r/${encodeURIComponent(roles.join(","))}`, ... })
+  ```
+  Chưa gắn thì dùng tạm tag `role` của job (chỉ có sau khi instance chạy ít nhất một job).
+
+Dashboard ClickStack dùng các field này cho nhóm **Instances** (đang chạy theo service, danh sách instance + role + heap/CPU/lag, số instance theo thời gian) và tách runtime theo instance.
+
 ### `GET /health`
 Trả 200 + số liệu: `received`, `queue`, `s3.{uploaded,failed,pending,lastError}`, `forward.{forwarded,failed,dropped,lastError}`. Image có sẵn `HEALTHCHECK`.
 

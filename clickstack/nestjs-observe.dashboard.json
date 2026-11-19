@@ -1,0 +1,608 @@
+{
+  "version": "1.0.0",
+  "description": "NestJS Observe (telemetry-stash): requests, endpoints, DB/HTTP calls, jobs, runtime, logs, custom metrics",
+  "name": "NestJS Observe",
+  "tags": [
+    "nestjs-observe"
+  ],
+  "tiles": [
+    {
+      "id": "d71818c0914f",
+      "x": 0,
+      "y": 13,
+      "w": 24,
+      "h": 2,
+      "config": {
+        "displayType": "markdown",
+        "markdown": "### Requests\nSpan SERVER (mỗi request là một span gốc). Lỗi = 5xx. **Bấm một dòng trong bảng để xem trace của nó.**  [→ Mở trang Services](/services)",
+        "source": "",
+        "where": "",
+        "select": [],
+        "name": ""
+      }
+    },
+    {
+      "id": "5b3b62e3914f",
+      "x": 0,
+      "y": 15,
+      "w": 6,
+      "h": 3,
+      "config": {
+        "configType": "sql",
+        "displayType": "number",
+        "name": "Requests",
+        "connection": "clickhouse-connection",
+        "sqlTemplate": "SELECT count() AS requests\nFROM default.otel_traces\nWHERE $__timeFilter_ms(Timestamp) AND SpanKind = 'Server' AND $__filter(ServiceName, $service) AND $__filter(ResourceAttributes['service.instance.id'], $instance)"
+      }
+    },
+    {
+      "id": "2b5dff4e914f",
+      "x": 6,
+      "y": 15,
+      "w": 6,
+      "h": 3,
+      "config": {
+        "configType": "sql",
+        "displayType": "number",
+        "name": "Error rate 5xx (%)",
+        "connection": "clickhouse-connection",
+        "sqlTemplate": "SELECT round(100 * countIf(StatusCode = 'Error') / greatest(count(), 1), 2) AS error_rate_pct\nFROM default.otel_traces\nWHERE $__timeFilter_ms(Timestamp) AND SpanKind = 'Server' AND $__filter(ServiceName, $service) AND $__filter(ResourceAttributes['service.instance.id'], $instance)"
+      }
+    },
+    {
+      "id": "7c351018914f",
+      "x": 12,
+      "y": 15,
+      "w": 6,
+      "h": 3,
+      "config": {
+        "configType": "sql",
+        "displayType": "number",
+        "name": "Latency p95 (ms)",
+        "connection": "clickhouse-connection",
+        "sqlTemplate": "SELECT round(quantile(0.95)(Duration) / 1e6, 1) AS p95_ms\nFROM default.otel_traces\nWHERE $__timeFilter_ms(Timestamp) AND SpanKind = 'Server' AND $__filter(ServiceName, $service) AND $__filter(ResourceAttributes['service.instance.id'], $instance)"
+      }
+    },
+    {
+      "id": "fdaaaf55914f",
+      "x": 18,
+      "y": 15,
+      "w": 6,
+      "h": 3,
+      "config": {
+        "configType": "sql",
+        "displayType": "number",
+        "name": "Failed jobs",
+        "connection": "clickhouse-connection",
+        "sqlTemplate": "SELECT countIf(StatusCode = 'Error') AS failed_jobs\nFROM default.otel_traces\nWHERE $__timeFilter_ms(Timestamp) AND SpanKind = 'Consumer' AND $__filter(ServiceName, $service) AND $__filter(ResourceAttributes['service.instance.id'], $instance)"
+      }
+    },
+    {
+      "id": "0ed59b1e914f",
+      "x": 0,
+      "y": 18,
+      "w": 12,
+      "h": 6,
+      "config": {
+        "configType": "sql",
+        "displayType": "stacked_bar",
+        "name": "Throughput theo status",
+        "connection": "clickhouse-connection",
+        "sqlTemplate": "SELECT\n  toStartOfInterval(Timestamp, INTERVAL {intervalSeconds:Int64} second) AS ts,\n  multiIf(toUInt16OrZero(SpanAttributes['http.status_code']) >= 500, '5xx', toUInt16OrZero(SpanAttributes['http.status_code']) >= 400, '4xx', '2xx/3xx') AS status,\n  count() AS requests\nFROM default.otel_traces\nWHERE $__timeFilter_ms(Timestamp) AND SpanKind = 'Server' AND $__filter(ServiceName, $service) AND $__filter(ResourceAttributes['service.instance.id'], $instance)\nGROUP BY ts, status\nORDER BY ts\nLIMIT 10000"
+      }
+    },
+    {
+      "id": "dcae0c5f914f",
+      "x": 12,
+      "y": 18,
+      "w": 12,
+      "h": 6,
+      "config": {
+        "configType": "sql",
+        "displayType": "line",
+        "name": "Latency p50 / p95 / p99 (ms)",
+        "connection": "clickhouse-connection",
+        "sqlTemplate": "SELECT\n  toStartOfInterval(Timestamp, INTERVAL {intervalSeconds:Int64} second) AS ts,\n  round(quantile(0.5)(Duration) / 1e6, 1) AS p50,\n  round(quantile(0.95)(Duration) / 1e6, 1) AS p95,\n  round(quantile(0.99)(Duration) / 1e6, 1) AS p99\nFROM default.otel_traces\nWHERE $__timeFilter_ms(Timestamp) AND SpanKind = 'Server' AND $__filter(ServiceName, $service) AND $__filter(ResourceAttributes['service.instance.id'], $instance)\nGROUP BY ts\nORDER BY ts\nLIMIT 10000"
+      }
+    },
+    {
+      "id": "cbec8833914f",
+      "x": 0,
+      "y": 24,
+      "w": 24,
+      "h": 8,
+      "config": {
+        "configType": "sql",
+        "displayType": "table",
+        "name": "Endpoints",
+        "connection": "clickhouse-connection",
+        "sqlTemplate": "SELECT\n  ServiceName AS service,\n  SpanName AS endpoint,\n  count() AS calls,\n  countIf(toUInt16OrZero(SpanAttributes['http.status_code']) BETWEEN 400 AND 499) AS errors_4xx,\n  countIf(StatusCode = 'Error') AS errors_5xx,\n  round(quantile(0.5)(Duration) / 1e6, 1) AS p50_ms,\n  round(quantile(0.95)(Duration) / 1e6, 1) AS p95_ms,\n  round(max(Duration) / 1e6, 1) AS max_ms\nFROM default.otel_traces\nWHERE $__timeFilter_ms(Timestamp) AND SpanKind = 'Server' AND $__filter(ServiceName, $service) AND $__filter(ResourceAttributes['service.instance.id'], $instance)\nGROUP BY service, endpoint\nORDER BY calls DESC\nLIMIT 100",
+        "onClick": {
+          "type": "search",
+          "target": {
+            "mode": "template",
+            "template": "Traces"
+          },
+          "whereLanguage": "sql",
+          "filters": [
+            {
+              "kind": "expressionTemplate",
+              "expression": "ServiceName",
+              "template": "{{service}}"
+            },
+            {
+              "kind": "expressionTemplate",
+              "expression": "SpanName",
+              "template": "{{endpoint}}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "65c8d6e5914f",
+      "x": 0,
+      "y": 40,
+      "w": 24,
+      "h": 2,
+      "config": {
+        "displayType": "markdown",
+        "markdown": "### Bên trong request\nSpan con do Observe ghi: method của Guard/Pipe/Service, và lời gọi ra ngoài (HTTP, DB, LLM). Bấm dòng → trace.  [→ Mở trang Services](/services)",
+        "source": "",
+        "where": "",
+        "select": [],
+        "name": ""
+      }
+    },
+    {
+      "id": "36378b30914f",
+      "x": 0,
+      "y": 42,
+      "w": 12,
+      "h": 8,
+      "config": {
+        "configType": "sql",
+        "displayType": "table",
+        "name": "Method chậm nhất (p95)",
+        "connection": "clickhouse-connection",
+        "sqlTemplate": "SELECT\n  ServiceName AS service,\n  SpanName AS method,\n  count() AS calls,\n  round(quantile(0.95)(Duration) / 1e6, 1) AS p95_ms,\n  round(sum(Duration) / 1e6, 1) AS total_ms,\n  countIf(StatusCode = 'Error') AS errors\nFROM default.otel_traces\nWHERE $__timeFilter_ms(Timestamp) AND SpanKind = 'Internal' AND $__filter(ServiceName, $service) AND $__filter(ResourceAttributes['service.instance.id'], $instance)\nGROUP BY service, method\nORDER BY p95_ms DESC\nLIMIT 30",
+        "onClick": {
+          "type": "search",
+          "target": {
+            "mode": "template",
+            "template": "Traces"
+          },
+          "whereLanguage": "sql",
+          "filters": [
+            {
+              "kind": "expressionTemplate",
+              "expression": "ServiceName",
+              "template": "{{service}}"
+            },
+            {
+              "kind": "expressionTemplate",
+              "expression": "SpanName",
+              "template": "{{method}}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "e8501777914f",
+      "x": 12,
+      "y": 42,
+      "w": 12,
+      "h": 8,
+      "config": {
+        "configType": "sql",
+        "displayType": "table",
+        "name": "Gọi ra ngoài (HTTP / DB)",
+        "connection": "clickhouse-connection",
+        "sqlTemplate": "SELECT\n  ServiceName AS service,\n  SpanName AS call,\n  coalesce(nullIf(SpanAttributes['db.system'], ''), nullIf(SpanAttributes['llm.provider'], ''), 'http') AS kind,\n  count() AS calls,\n  round(quantile(0.95)(Duration) / 1e6, 1) AS p95_ms,\n  countIf(StatusCode = 'Error') AS errors\nFROM default.otel_traces\nWHERE $__timeFilter_ms(Timestamp) AND SpanKind = 'Client' AND $__filter(ServiceName, $service) AND $__filter(ResourceAttributes['service.instance.id'], $instance)\nGROUP BY service, call, kind\nORDER BY calls DESC\nLIMIT 30",
+        "onClick": {
+          "type": "search",
+          "target": {
+            "mode": "template",
+            "template": "Traces"
+          },
+          "whereLanguage": "sql",
+          "filters": [
+            {
+              "kind": "expressionTemplate",
+              "expression": "ServiceName",
+              "template": "{{service}}"
+            },
+            {
+              "kind": "expressionTemplate",
+              "expression": "SpanName",
+              "template": "{{call}}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "024c83b8914f",
+      "x": 0,
+      "y": 50,
+      "w": 24,
+      "h": 2,
+      "config": {
+        "displayType": "markdown",
+        "markdown": "### Jobs\nQueue / cron / interval job (span CONSUMER). Bấm dòng → trace của job.",
+        "source": "",
+        "where": "",
+        "select": [],
+        "name": ""
+      }
+    },
+    {
+      "id": "df5c926a914f",
+      "x": 0,
+      "y": 52,
+      "w": 12,
+      "h": 6,
+      "config": {
+        "configType": "sql",
+        "displayType": "stacked_bar",
+        "name": "Job runs theo trạng thái",
+        "connection": "clickhouse-connection",
+        "sqlTemplate": "SELECT\n  toStartOfInterval(Timestamp, INTERVAL {intervalSeconds:Int64} second) AS ts,\n  if(StatusCode = 'Error', 'failed', 'ok') AS status,\n  count() AS runs\nFROM default.otel_traces\nWHERE $__timeFilter_ms(Timestamp) AND SpanKind = 'Consumer' AND $__filter(ServiceName, $service) AND $__filter(ResourceAttributes['service.instance.id'], $instance)\nGROUP BY ts, status\nORDER BY ts\nLIMIT 10000"
+      }
+    },
+    {
+      "id": "44217532914f",
+      "x": 12,
+      "y": 52,
+      "w": 12,
+      "h": 6,
+      "config": {
+        "configType": "sql",
+        "displayType": "table",
+        "name": "Jobs",
+        "connection": "clickhouse-connection",
+        "sqlTemplate": "SELECT\n  ServiceName AS service,\n  SpanName AS job,\n  count() AS runs,\n  countIf(StatusCode = 'Error') AS failed,\n  round(quantile(0.95)(Duration) / 1e6, 1) AS p95_ms,\n  max(Timestamp) AS last_run\nFROM default.otel_traces\nWHERE $__timeFilter_ms(Timestamp) AND SpanKind = 'Consumer' AND $__filter(ServiceName, $service) AND $__filter(ResourceAttributes['service.instance.id'], $instance)\nGROUP BY service, job\nORDER BY runs DESC\nLIMIT 50",
+        "onClick": {
+          "type": "search",
+          "target": {
+            "mode": "template",
+            "template": "Traces"
+          },
+          "whereLanguage": "sql",
+          "filters": [
+            {
+              "kind": "expressionTemplate",
+              "expression": "ServiceName",
+              "template": "{{service}}"
+            },
+            {
+              "kind": "expressionTemplate",
+              "expression": "SpanName",
+              "template": "{{job}}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "ae25006a914f",
+      "x": 0,
+      "y": 58,
+      "w": 24,
+      "h": 2,
+      "config": {
+        "displayType": "markdown",
+        "markdown": "### Runtime\nRuntime metrics của Observe (30s/lần), **mỗi instance một đường** — chọn Instance ở trên để xem riêng.",
+        "source": "",
+        "where": "",
+        "select": [],
+        "name": ""
+      }
+    },
+    {
+      "id": "9e2c1ce8914f",
+      "x": 0,
+      "y": 60,
+      "w": 8,
+      "h": 6,
+      "config": {
+        "configType": "sql",
+        "displayType": "line",
+        "name": "Heap used (MiB)",
+        "connection": "clickhouse-connection",
+        "sqlTemplate": "SELECT\n  toStartOfInterval(TimeUnix, INTERVAL {intervalSeconds:Int64} second) AS ts,\n  if(empty(ResourceAttributes['service.instance.id']), ServiceName, ResourceAttributes['service.instance.id']) AS series,\n  avg(Value) AS value\nFROM default.otel_metrics_gauge\nWHERE $__timeFilter(TimeUnix)\n  AND MetricName IN ('process.memory.heap_used')\n  AND ScopeName = '@nestjs/observe' AND $__filter(ServiceName, $service) AND $__filter(ResourceAttributes['service.instance.id'], $instance)\nGROUP BY ts, series\nORDER BY ts\nLIMIT 10000"
+      }
+    },
+    {
+      "id": "913d1942914f",
+      "x": 8,
+      "y": 60,
+      "w": 8,
+      "h": 6,
+      "config": {
+        "configType": "sql",
+        "displayType": "line",
+        "name": "CPU (%)",
+        "connection": "clickhouse-connection",
+        "sqlTemplate": "SELECT\n  toStartOfInterval(TimeUnix, INTERVAL {intervalSeconds:Int64} second) AS ts,\n  if(empty(ResourceAttributes['service.instance.id']), ServiceName, ResourceAttributes['service.instance.id']) AS series,\n  avg(Value) AS value\nFROM default.otel_metrics_gauge\nWHERE $__timeFilter(TimeUnix)\n  AND MetricName IN ('process.cpu.percent')\n  AND ScopeName = '@nestjs/observe' AND $__filter(ServiceName, $service) AND $__filter(ResourceAttributes['service.instance.id'], $instance)\nGROUP BY ts, series\nORDER BY ts\nLIMIT 10000"
+      }
+    },
+    {
+      "id": "fbc161e9914f",
+      "x": 16,
+      "y": 60,
+      "w": 8,
+      "h": 6,
+      "config": {
+        "configType": "sql",
+        "displayType": "line",
+        "name": "Event loop lag (ms)",
+        "connection": "clickhouse-connection",
+        "sqlTemplate": "SELECT\n  toStartOfInterval(TimeUnix, INTERVAL {intervalSeconds:Int64} second) AS ts,\n  if(empty(ResourceAttributes['service.instance.id']), ServiceName, ResourceAttributes['service.instance.id']) AS series,\n  max(Value) AS value\nFROM default.otel_metrics_gauge\nWHERE $__timeFilter(TimeUnix)\n  AND MetricName IN ('nodejs.eventloop.lag')\n  AND ScopeName = '@nestjs/observe' AND $__filter(ServiceName, $service) AND $__filter(ResourceAttributes['service.instance.id'], $instance)\nGROUP BY ts, series\nORDER BY ts\nLIMIT 10000"
+      }
+    },
+    {
+      "id": "e448251d914f",
+      "x": 0,
+      "y": 66,
+      "w": 8,
+      "h": 6,
+      "config": {
+        "configType": "sql",
+        "displayType": "line",
+        "name": "Event loop utilization (%)",
+        "connection": "clickhouse-connection",
+        "sqlTemplate": "SELECT\n  toStartOfInterval(TimeUnix, INTERVAL {intervalSeconds:Int64} second) AS ts,\n  if(empty(ResourceAttributes['service.instance.id']), ServiceName, ResourceAttributes['service.instance.id']) AS series,\n  round(100 * avg(Value), 2) AS value\nFROM default.otel_metrics_gauge\nWHERE $__timeFilter(TimeUnix)\n  AND MetricName IN ('nodejs.eventloop.utilization')\n  AND ScopeName = '@nestjs/observe' AND $__filter(ServiceName, $service) AND $__filter(ResourceAttributes['service.instance.id'], $instance)\nGROUP BY ts, series\nORDER BY ts\nLIMIT 10000"
+      }
+    },
+    {
+      "id": "698346ec914f",
+      "x": 8,
+      "y": 66,
+      "w": 8,
+      "h": 6,
+      "config": {
+        "configType": "sql",
+        "displayType": "line",
+        "name": "RSS (MiB)",
+        "connection": "clickhouse-connection",
+        "sqlTemplate": "SELECT\n  toStartOfInterval(TimeUnix, INTERVAL {intervalSeconds:Int64} second) AS ts,\n  if(empty(ResourceAttributes['service.instance.id']), ServiceName, ResourceAttributes['service.instance.id']) AS series,\n  avg(Value) AS value\nFROM default.otel_metrics_gauge\nWHERE $__timeFilter(TimeUnix)\n  AND MetricName IN ('process.memory.rss')\n  AND ScopeName = '@nestjs/observe' AND $__filter(ServiceName, $service) AND $__filter(ResourceAttributes['service.instance.id'], $instance)\nGROUP BY ts, series\nORDER BY ts\nLIMIT 10000"
+      }
+    },
+    {
+      "id": "3c102b63914f",
+      "x": 16,
+      "y": 66,
+      "w": 8,
+      "h": 6,
+      "config": {
+        "configType": "sql",
+        "displayType": "stacked_bar",
+        "name": "GC duration theo loại (ms)",
+        "connection": "clickhouse-connection",
+        "sqlTemplate": "SELECT\n  toStartOfInterval(TimeUnix, INTERVAL {intervalSeconds:Int64} second) AS ts,\n  Attributes['gc.type'] AS gc_type,\n  sum(Value) AS duration_ms\nFROM default.otel_metrics_gauge\nWHERE $__timeFilter(TimeUnix) AND MetricName = 'nodejs.gc.duration_by_type' AND $__filter(ServiceName, $service) AND $__filter(ResourceAttributes['service.instance.id'], $instance)\nGROUP BY ts, gc_type\nORDER BY ts\nLIMIT 10000"
+      }
+    },
+    {
+      "id": "a3b653ec914f",
+      "x": 0,
+      "y": 72,
+      "w": 24,
+      "h": 2,
+      "config": {
+        "displayType": "markdown",
+        "markdown": "### Logs\nLog forward từ Logger của Nest (forwardLogs). Bấm log lỗi → toàn bộ SQL của trace đó (Services › Database).",
+        "source": "",
+        "where": "",
+        "select": [],
+        "name": ""
+      }
+    },
+    {
+      "id": "fe1f7ac3914f",
+      "x": 0,
+      "y": 74,
+      "w": 12,
+      "h": 6,
+      "config": {
+        "configType": "sql",
+        "displayType": "stacked_bar",
+        "name": "Log theo level",
+        "connection": "clickhouse-connection",
+        "sqlTemplate": "SELECT\n  toStartOfInterval(Timestamp, INTERVAL {intervalSeconds:Int64} second) AS ts,\n  SeverityText AS level,\n  count() AS logs\nFROM default.otel_logs\nWHERE $__timeFilter_ms(Timestamp) AND $__filter(ServiceName, $service) AND $__filter(ResourceAttributes['service.instance.id'], $instance)\nGROUP BY ts, level\nORDER BY ts\nLIMIT 10000"
+      }
+    },
+    {
+      "id": "1d0a0081914f",
+      "x": 12,
+      "y": 74,
+      "w": 12,
+      "h": 6,
+      "config": {
+        "configType": "sql",
+        "displayType": "table",
+        "name": "Log lỗi gần nhất",
+        "connection": "clickhouse-connection",
+        "sqlTemplate": "SELECT\n  Timestamp AS time,\n  ServiceName AS service,\n  LogAttributes['log.context'] AS context,\n  substring(Body, 1, 300) AS message,\n  TraceId AS trace_id,\n  concat('TraceId = ''', TraceId, '''') AS trace_filter,\n  toUnixTimestamp64Milli(Timestamp) - 300000 AS from_ms,\n  toUnixTimestamp64Milli(Timestamp) + 300000 AS to_ms\nFROM default.otel_logs\nWHERE $__timeFilter_ms(Timestamp) AND SeverityNumber >= 17 AND TraceId != '' AND $__filter(ServiceName, $service) AND $__filter(ResourceAttributes['service.instance.id'], $instance)\nORDER BY Timestamp DESC\nLIMIT 50",
+        "onClick": {
+          "type": "external",
+          "urlTemplate": "https://clickstack.ngovanxuanduc.com/services?source=6afe761fa0bce27b6702656e&whereLanguage=sql&tab=database&service={{service}}&where={{trace_filter}}&from={{from_ms}}&to={{to_ms}}"
+        }
+      }
+    },
+    {
+      "id": "8b87f2d1914f",
+      "x": 0,
+      "y": 80,
+      "w": 24,
+      "h": 2,
+      "config": {
+        "displayType": "markdown",
+        "markdown": "### Custom metrics\nCounter / Gauge / Summary do app tự định nghĩa qua TracerService.",
+        "source": "",
+        "where": "",
+        "select": [],
+        "name": ""
+      }
+    },
+    {
+      "id": "87b5b422914f",
+      "x": 0,
+      "y": 82,
+      "w": 12,
+      "h": 6,
+      "config": {
+        "configType": "sql",
+        "displayType": "line",
+        "name": "Counters (luỹ kế, cộng mọi instance)",
+        "connection": "clickhouse-connection",
+        "sqlTemplate": "SELECT ts, series, sum(last_value) AS value\nFROM (\n  SELECT\n    toStartOfInterval(TimeUnix, INTERVAL {intervalSeconds:Int64} second) AS ts,\n    concat(MetricName, if(empty(Attributes), '', concat(' ', toString(Attributes)))) AS series,\n    ResourceAttributes['service.instance.id'] AS instance,\n    argMax(Value, TimeUnix) AS last_value\n  FROM default.otel_metrics_sum\n  WHERE $__timeFilter(TimeUnix) AND ScopeName = '@nestjs/observe' AND MetricName NOT LIKE 'process.%' AND MetricName NOT LIKE 'nodejs.%' AND $__filter(ServiceName, $service) AND $__filter(ResourceAttributes['service.instance.id'], $instance)\n  GROUP BY ts, series, instance\n)\nGROUP BY ts, series\nORDER BY ts\nLIMIT 10000"
+      }
+    },
+    {
+      "id": "5cb970a1914f",
+      "x": 12,
+      "y": 82,
+      "w": 12,
+      "h": 6,
+      "config": {
+        "configType": "sql",
+        "displayType": "line",
+        "name": "Gauges",
+        "connection": "clickhouse-connection",
+        "sqlTemplate": "SELECT\n  toStartOfInterval(TimeUnix, INTERVAL {intervalSeconds:Int64} second) AS ts,\n  concat(MetricName, if(empty(Attributes), '', concat(' ', toString(Attributes)))) AS series,\n  avg(Value) AS value\nFROM default.otel_metrics_gauge\nWHERE $__timeFilter(TimeUnix) AND ScopeName = '@nestjs/observe' AND MetricName NOT LIKE 'process.%' AND MetricName NOT LIKE 'nodejs.%' AND MetricName NOT LIKE '%.max' AND $__filter(ServiceName, $service) AND $__filter(ResourceAttributes['service.instance.id'], $instance)\nGROUP BY ts, series\nORDER BY ts\nLIMIT 10000"
+      }
+    },
+    {
+      "id": "a5d67efd914f",
+      "x": 0,
+      "y": 88,
+      "w": 12,
+      "h": 6,
+      "config": {
+        "configType": "sql",
+        "displayType": "line",
+        "name": "Summaries (p95)",
+        "connection": "clickhouse-connection",
+        "sqlTemplate": "SELECT\n  toStartOfInterval(TimeUnix, INTERVAL {intervalSeconds:Int64} second) AS ts,\n  concat(MetricName, if(empty(Attributes), '', concat(' ', toString(Attributes)))) AS series,\n  max(ValueAtQuantiles.Value[indexOf(ValueAtQuantiles.Quantile, 0.95)]) AS p95\nFROM default.otel_metrics_summary\nWHERE $__timeFilter(TimeUnix) AND ScopeName = '@nestjs/observe' AND $__filter(ServiceName, $service) AND $__filter(ResourceAttributes['service.instance.id'], $instance)\nGROUP BY ts, series\nORDER BY ts\nLIMIT 10000"
+      }
+    },
+    {
+      "id": "f8f66a03914f",
+      "x": 12,
+      "y": 88,
+      "w": 12,
+      "h": 6,
+      "config": {
+        "configType": "sql",
+        "displayType": "table",
+        "name": "Summaries (tổng hợp)",
+        "connection": "clickhouse-connection",
+        "sqlTemplate": "SELECT\n  concat(MetricName, if(empty(Attributes), '', concat(' ', toString(Attributes)))) AS series,\n  sum(Count) AS observations,\n  round(sum(Sum) / greatest(sum(Count), 1), 2) AS mean,\n  max(ValueAtQuantiles.Value[indexOf(ValueAtQuantiles.Quantile, 0.95)]) AS max_p95\nFROM default.otel_metrics_summary\nWHERE $__timeFilter(TimeUnix) AND ScopeName = '@nestjs/observe' AND $__filter(ServiceName, $service) AND $__filter(ResourceAttributes['service.instance.id'], $instance)\nGROUP BY series\nORDER BY observations DESC\nLIMIT 50"
+      }
+    },
+    {
+      "id": "56df2c17914f",
+      "x": 0,
+      "y": 32,
+      "w": 24,
+      "h": 8,
+      "config": {
+        "configType": "sql",
+        "displayType": "table",
+        "name": "Request chậm nhất — bấm để xem SQL của request",
+        "connection": "clickhouse-connection",
+        "sqlTemplate": "WITH slow AS (\n  SELECT Timestamp, ServiceName, SpanName, SpanAttributes['http.status_code'] AS status, Duration, TraceId\n  FROM default.otel_traces\n  WHERE $__timeFilter_ms(Timestamp) AND SpanKind = 'Server' AND $__filter(ServiceName, $service) AND $__filter(ResourceAttributes['service.instance.id'], $instance)\n  ORDER BY Duration DESC\n  LIMIT 50\n),\ndb AS (\n  SELECT TraceId, count() AS queries, sum(Duration) AS db_ns\n  FROM default.otel_traces\n  WHERE $__timeFilter_ms(Timestamp) AND SpanAttributes['db.system'] != ''\n    AND TraceId IN (SELECT TraceId FROM slow)\n  GROUP BY TraceId\n)\nSELECT\n  slow.Timestamp AS time,\n  slow.ServiceName AS service,\n  slow.SpanName AS endpoint,\n  slow.status AS status,\n  round(slow.Duration / 1e6, 1) AS duration_ms,\n  coalesce(db.queries, 0) AS db_queries,\n  round(coalesce(db.db_ns, 0) / 1e6, 1) AS db_ms,\n  slow.TraceId AS trace_id,\n  concat('TraceId = ''', slow.TraceId, '''') AS trace_filter,\n  toUnixTimestamp64Milli(slow.Timestamp) - 60000 AS from_ms,\n  toUnixTimestamp64Milli(slow.Timestamp) + intDiv(slow.Duration, 1000000) + 60000 AS to_ms\nFROM slow\nLEFT JOIN db ON db.TraceId = slow.TraceId\nORDER BY slow.Duration DESC\nLIMIT 50",
+        "onClick": {
+          "type": "external",
+          "urlTemplate": "https://clickstack.ngovanxuanduc.com/services?source=6afe761fa0bce27b6702656e&whereLanguage=sql&tab=database&service={{service}}&where={{trace_filter}}&from={{from_ms}}&to={{to_ms}}"
+        }
+      }
+    },
+    {
+      "id": "18c6ff6d914f",
+      "x": 0,
+      "y": 0,
+      "w": 24,
+      "h": 2,
+      "config": {
+        "displayType": "markdown",
+        "markdown": "### Instances\nĐang chạy = gửi runtime metrics trong 90 giây gần nhất (mỗi process gửi 30s/lần, kể cả khi rảnh). Không phụ thuộc khung thời gian đang chọn.",
+        "source": "",
+        "where": "",
+        "select": [],
+        "name": ""
+      }
+    },
+    {
+      "id": "82450f98914f",
+      "x": 0,
+      "y": 2,
+      "w": 7,
+      "h": 6,
+      "config": {
+        "configType": "sql",
+        "displayType": "table",
+        "name": "Đang chạy theo service (90s gần nhất)",
+        "connection": "clickhouse-connection",
+        "sqlTemplate": "SELECT\n  ServiceName AS service,\n  uniqExact(if(empty(ResourceAttributes['service.instance.id']), ServiceName, ResourceAttributes['service.instance.id'])) AS instances,\n  arrayStringConcat(arraySort(arrayFilter(r -> r != '', arrayDistinct(arrayFlatten(groupArray(splitByChar(',', ResourceAttributes['observe.roles'])))))), ', ') AS roles\nFROM default.otel_metrics_gauge\nWHERE TimeUnix >= now() - INTERVAL 90 SECOND\n  AND MetricName = 'process.cpu.percent' AND ScopeName = '@nestjs/observe' AND $__filter(ServiceName, $service) AND $__filter(ResourceAttributes['service.instance.id'], $instance)\nGROUP BY service\nORDER BY service\nLIMIT 100"
+      }
+    },
+    {
+      "id": "e4172cfd914f",
+      "x": 7,
+      "y": 2,
+      "w": 17,
+      "h": 6,
+      "config": {
+        "configType": "sql",
+        "displayType": "table",
+        "name": "Instances (trong khung thời gian đang chọn)",
+        "connection": "clickhouse-connection",
+        "sqlTemplate": "WITH rt AS (\n  SELECT\n    ServiceName AS service,\n    if(empty(ResourceAttributes['service.instance.id']), ServiceName, ResourceAttributes['service.instance.id']) AS instance,\n    max(TimeUnix) AS last_seen,\n    min(TimeUnix) AS first_seen,\n    any(ResourceAttributes['observe.source.ip']) AS ip,\n    groupArray(splitByChar(',', ResourceAttributes['observe.roles'])) AS path_roles,\n    round(argMaxIf(Value, TimeUnix, MetricName = 'process.memory.heap_used'), 1) AS heap_mib,\n    round(argMaxIf(Value, TimeUnix, MetricName = 'process.memory.rss'), 1) AS rss_mib,\n    round(argMaxIf(Value, TimeUnix, MetricName = 'process.cpu.percent'), 1) AS cpu_pct,\n    round(argMaxIf(Value, TimeUnix, MetricName = 'nodejs.eventloop.lag'), 1) AS loop_lag_ms\n  FROM default.otel_metrics_gauge\n  WHERE $__timeFilter(TimeUnix) AND ScopeName = '@nestjs/observe' AND $__filter(ServiceName, $service) AND $__filter(ResourceAttributes['service.instance.id'], $instance)\n  GROUP BY service, instance\n),\njobs AS (\n  -- dự phòng: role từ tag của job (app chưa gắn /r/<roles> vào endpoint)\n  SELECT ServiceName AS service, if(empty(ResourceAttributes['service.instance.id']), ServiceName, ResourceAttributes['service.instance.id']) AS instance,\n    groupUniqArray(SpanAttributes['role']) AS job_roles\n  FROM default.otel_traces\n  WHERE $__timeFilter_ms(Timestamp) AND SpanKind = 'Consumer' AND SpanAttributes['role'] != '' AND $__filter(ServiceName, $service) AND $__filter(ResourceAttributes['service.instance.id'], $instance)\n  GROUP BY service, instance\n)\nSELECT\n  if(rt.last_seen >= now() - INTERVAL 90 SECOND, '🟢 running', '⚪ stopped') AS status,\n  rt.service AS service,\n  rt.instance AS instance,\n  arrayStringConcat(arraySort(arrayFilter(r -> r != '', arrayDistinct(arrayConcat(arrayFlatten(rt.path_roles), arrayFlatten(arrayMap(x -> splitByChar(',', x), jobs.job_roles)))))), ', ') AS roles,\n  rt.last_seen AS last_seen,\n  rt.first_seen AS first_seen,\n  rt.heap_mib AS heap_mib,\n  rt.rss_mib AS rss_mib,\n  rt.cpu_pct AS cpu_pct,\n  rt.loop_lag_ms AS loop_lag_ms,\n  rt.ip AS ip\nFROM rt\nLEFT JOIN jobs ON jobs.service = rt.service AND jobs.instance = rt.instance\nORDER BY status, service, instance\nLIMIT 500"
+      }
+    },
+    {
+      "id": "6043020c914f",
+      "x": 0,
+      "y": 8,
+      "w": 24,
+      "h": 5,
+      "config": {
+        "configType": "sql",
+        "displayType": "line",
+        "name": "Số instance theo thời gian",
+        "connection": "clickhouse-connection",
+        "sqlTemplate": "SELECT\n  toStartOfInterval(TimeUnix, INTERVAL {intervalSeconds:Int64} second) AS ts,\n  ServiceName AS service,\n  uniqExact(if(empty(ResourceAttributes['service.instance.id']), ServiceName, ResourceAttributes['service.instance.id'])) AS instances\nFROM default.otel_metrics_gauge\nWHERE $__timeFilter(TimeUnix) AND MetricName = 'process.cpu.percent' AND ScopeName = '@nestjs/observe' AND $__filter(ServiceName, $service) AND $__filter(ResourceAttributes['service.instance.id'], $instance)\nGROUP BY ts, service\nORDER BY ts\nLIMIT 10000"
+      }
+    }
+  ],
+  "filters": [
+    {
+      "id": "28ebbf59914f",
+      "type": "QUERY_EXPRESSION",
+      "name": "Service",
+      "expression": "ServiceName",
+      "source": "traces-source",
+      "where": "",
+      "whereLanguage": "sql",
+      "isBroadcastEnabled": false,
+      "isVariableEnabled": true,
+      "variableName": "service"
+    },
+    {
+      "id": "ac212dc9914f",
+      "type": "QUERY_EXPRESSION",
+      "name": "Instance",
+      "expression": "ResourceAttributes['service.instance.id']",
+      "source": "metrics-source",
+      "sourceMetricType": "gauge",
+      "where": "",
+      "whereLanguage": "sql",
+      "isBroadcastEnabled": false,
+      "isVariableEnabled": true,
+      "variableName": "instance"
+    }
+  ]
+}

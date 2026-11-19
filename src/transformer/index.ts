@@ -5,6 +5,16 @@ import { msToNs, payloadTimeMs, pushAttr, OtlpAttribute } from "./otlp.util.js";
 
 const SCOPE = { name: "@nestjs/observe" };
 
+/** Dự phòng khi app chưa gắn `/r/<roles>` vào endpoint: lấy tag `role` của các job trong batch. */
+function rolesFromJobTags(payload: any): string | undefined {
+  const roles = new Set<string>();
+  for (const j of payload.jobs || []) {
+    const r = j?.tg?.role;
+    if (typeof r === "string") for (const part of r.split(",")) if (part.trim()) roles.add(part.trim());
+  }
+  return roles.size ? [...roles].sort().join(",") : undefined;
+}
+
 /** Một batch Observe (định dạng wire của agent) → payload OTLP/JSON cho traces, logs, metrics. */
 export function transformToOtlp(payload: any) {
   const timeMs = payloadTimeMs(payload);
@@ -13,6 +23,11 @@ export function transformToOtlp(payload: any) {
   const resourceAttributes: OtlpAttribute[] = [];
   pushAttr(resourceAttributes, "service.name", payload.serviceId || "nest-app");
   pushAttr(resourceAttributes, "service.version", payload.serviceVersion || payload.v);
+  // Do stash gắn khi nhận (payload Observe không có): instance + role của process gửi.
+  const source = payload._source && typeof payload._source === "object" ? payload._source : {};
+  pushAttr(resourceAttributes, "service.instance.id", source.instance);
+  pushAttr(resourceAttributes, "observe.roles", source.roles || rolesFromJobTags(payload));
+  pushAttr(resourceAttributes, "observe.source.ip", source.ip);
   const resource = { attributes: resourceAttributes };
 
   // 1. Traces

@@ -17,6 +17,7 @@ import { writeReadablePayload } from "../storage/readable.writer.js";
 import { S3SegmentUploader } from "../storage/s3.uploader.js";
 import { OtlpForwarder } from "../forward/otlp.forwarder.js";
 import { transformToOtlp } from "../transformer/index.js";
+import { resolveSource } from "./source.resolver.js";
 
 /** Thời gian tối đa chờ request đang nhận dở xong khi tắt. */
 const SERVER_CLOSE_TIMEOUT_MS = 10_000;
@@ -46,12 +47,21 @@ export const activeOptions: StashOptions = {
  * để replay có mốc thời gian cho runtime metrics (payload Observe không mang timestamp cho phần này).
  */
 export function withReceivedAt(buffer: Buffer, receivedAt: number): Buffer {
+  return withMeta(buffer, { _receivedAt: receivedAt });
+}
+
+/** Chèn các field meta (`_receivedAt`, `_source`...) vào đầu object JSON — chỉ nối chuỗi, không parse payload. */
+export function withMeta(buffer: Buffer, meta: Record<string, unknown>): Buffer {
   const text = buffer.toString("utf-8").trim();
   if (!text.startsWith("{")) return buffer;
   const rest = text.slice(1).trimStart();
-  const field = `"_receivedAt":${receivedAt}`;
+  const fields = Object.entries(meta)
+    .filter(([, v]) => v !== undefined)
+    .map(([k, v]) => `${JSON.stringify(k)}:${JSON.stringify(v)}`)
+    .join(",");
+  if (!fields) return buffer;
   return Buffer.from(
-    rest.startsWith("}") ? `{${field}${rest}` : `{${field},${rest}`,
+    rest.startsWith("}") ? `{${fields}${rest}` : `{${fields},${rest}`,
     "utf-8",
   );
 }
@@ -224,15 +234,18 @@ export function startCollectorServer(options?: StartOptions): Server {
       chunks.push(chunk);
     });
 
-    req.on("end", () => {
+    req.on("end", async () => {
       if (res.writableEnded) return;
 
       try {
+        const receivedAt = Date.now();
         let buffer: Buffer = Buffer.concat(chunks);
         if (req.headers["content-encoding"] === "gzip" || buffer[0] === 0x1f) {
           buffer = gunzipSync(buffer);
         }
-        buffer = withReceivedAt(buffer, Date.now());
+        // Instance + role của bên gửi (payload Observe không mang thông tin này).
+        const source = await resolveSource(req, activeOptions.instanceId || defaultInstanceId());
+        buffer = withMeta(buffer, { _receivedAt: receivedAt, _source: source });
         receivedCount++;
 
         // 1. Lưu thô (luôn là nguồn sự thật — forward lỗi vẫn replay được)
