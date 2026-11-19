@@ -1,0 +1,9 @@
+# Image chỉ cần package*.json, tsconfig.json, src/, bin/
+node_modules
+dist
+demo
+clickstack
+telemetry-storage
+.git
+.vscode
+*.log
