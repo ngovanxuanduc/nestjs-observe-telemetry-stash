@@ -50,3 +50,6 @@ pnpm-debug.log*
 # TypeScript / Type Definitions (If generating declarations via build step)
 # Uncomment the line below if your root folder auto-generates TS declarations you want to ignore
 # *.tsbuildinfo
+
+# Exported docker images
+*.tar.gz

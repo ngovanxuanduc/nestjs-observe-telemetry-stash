@@ -1,116 +1,188 @@
 # nestjs-observe-telemetry-stash
 
-Zero-config offline telemetry stash and compressed file sink for `nestjs-observe`.
+Receiver + kho đệm offline cho telemetry của [`@nestjs/observe`](https://observe.nestjs.com) (đã kiểm chứng với 0.1.x và 0.3.26).
 
-Giúp ứng dụng NestJS tự mở HTTP Receiver local để chặn triệt để lỗi `ECONNREFUSED` từ `ObserveAgentWorker`, lưu trữ nén Gzip (`.jsonl.gz`) tối ưu đĩa/CPU và hỗ trợ CLI Replay dữ liệu lên SigNoz / OpenTelemetry Collector khi cần.
+Nhận batch của `ObserveAgentWorker` (thay cho collector hosted), lưu nén `.jsonl.gz`, và chuyển sang OpenTelemetry (OTLP) để đẩy lên ClickStack / SigNoz / OTel Collector:
 
----
+- **Lưu thô** — luôn bật, là nguồn sự thật. Local disk, tuỳ chọn **upload S3**.
+- **Replay** — CLI đọc lại từ local hoặc S3 → OTLP.
+- **Forward** — (tắt mặc định) đẩy OTLP ngay khi nhận, best-effort; lỗi thì vẫn còn file thô để replay.
 
-## 🚀 Quick Start (Zero-Config)
-
-Chỉ cần import thư viện ở **dòng đầu tiên** của file `src/main.ts`:
-
-```typescript
-import "nestjs-observe-telemetry-stash"; // 👈 Bắt buộc ở dòng 1 (trước tất cả import khác)
-
-import { NestFactory } from "@nestjs/core";
-import { AppModule } from "./app.module";
-
-async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
-  await app.listen(3000);
-}
-bootstrap();
+```
+@nestjs/observe ──POST──► telemetry-stash ──► segment .jsonl.gz ──► (S3)
+                              │                      │
+                              │ forward (tuỳ chọn)   └── replay CLI ──┐
+                              ▼                                       ▼
+                         OTLP/HTTP collector (ClickStack :4318, SigNoz, OTel Collector)
 ```
 
 ---
 
-## ⚙️ Custom Configuration
+## 🚀 Dùng trong app (in-process)
 
-Nếu không muốn dùng cổng `3301` hoặc đường dẫn lưu trữ mặc định, bạn có thể gọi hàm `configureStash()` để tùy chỉnh:
+Import ở **dòng đầu tiên** của `main.ts`, trỏ `endpoint` của Observe vào cổng stash:
 
 ```typescript
-import { configureStash } from "nestjs-observe-telemetry-stash";
+import "@ducnvx/nestjs-observe-telemetry-stash"; // 👈 dòng 1
+
+// ObserveModule.forRoot({ endpoint: "http://localhost:3301", appKey: "...", appSecret: "...", ... })
+```
+
+> Observe 0.3.x không gửi gì nếu `appKey`/`appSecret` rỗng hoặc là placeholder `YOUR_APP_KEY`. Stash không kiểm tra key — chuỗi bất kỳ là được.
+
+Cấu hình bằng code (ưu tiên hơn biến môi trường):
+
+```typescript
+import { configureStash } from "@ducnvx/nestjs-observe-telemetry-stash";
 
 configureStash({
-  port: 3301, // Port HTTP Receiver (Mặc định: 3301)
-  storageDir: "./telemetry-stash", // Thư mục lưu file (Mặc định: ./telemetry-storage)
-  raw: true, // Bật lưu nén .jsonl.gz để replay (Mặc định: true)
-  readable: true, // Bật xuất OTLP JSON thô để debug local (Mặc định: false)
+  port: 3301,
+  storageDir: "./telemetry-storage",
+  readable: true, // ghi thêm OTLP JSON dễ đọc để debug
+  s3: { bucket: "my-telemetry", prefix: "api" },
+  forward: { enabled: true, endpoint: "http://localhost:4318" },
 });
 ```
 
-### Environment Variables
+Dùng S3 khi chạy in-process thì app phải cài thêm `@aws-sdk/client-s3` (optional peer). Image Docker có sẵn.
 
-Bạn cũng có thể cấu hình nhanh thông qua file `.env` mà không cần sửa code:
+## 🐳 Chạy container (standalone)
 
-| Biến môi trường         | Mặc định              | Mô tả                                               |
-| ----------------------- | --------------------- | --------------------------------------------------- |
-| `TELEMETRY_PORT`        | `3301`                | Cổng HTTP Receiver hứng telemetry từ Observe Worker |
-| `TELEMETRY_STORAGE_DIR` | `./telemetry-storage` | Thư mục đĩa dùng để ghi file stash                  |
+```bash
+docker compose up -d --build        # xem docker-compose.yml
+curl localhost:3301/health
+```
+
+Image build cho amd64 từ máy ARM: `docker buildx build --platform linux/amd64 -t telemetry-stash:<version> --load .`
 
 ---
 
-## 🔄 CLI Replay Tool
+## ⚙️ Biến môi trường
 
-Sử dụng lệnh `telemetry-stash-replay` (hoặc `npx telemetry-stash-replay`) để đọc file nén và đẩy ngược dữ liệu lên SigNoz / OTLP Collector.
+| Biến | Mặc định | Mô tả |
+|---|---|---|
+| `TELEMETRY_PORT` | `3301` | Cổng nhận |
+| `TELEMETRY_HOST` | `0.0.0.0` | Địa chỉ lắng nghe. Sidecar ECS: `127.0.0.1` |
+| `TELEMETRY_STORAGE_DIR` | `./telemetry-storage` (image: `/data/telemetry`) | Thư mục segment |
+| `TELEMETRY_INSTANCE_ID` | `<hostname>-<pid>` | Ghép vào tên file; nhiều instance ghi chung bucket không đè nhau |
+| `TELEMETRY_MAX_SEGMENT_BYTES` | `10485760` | Đóng segment khi vượt dung lượng (nén) |
+| `TELEMETRY_SEGMENT_MAX_AGE_MS` | `0` (có S3: `300000`) | Đóng segment sau thời gian này → lên S3 đều đặn |
+| `TELEMETRY_READABLE` | `false` | Ghi thêm `readable-*.jsonl` (OTLP JSON) để debug |
+| **S3** — bật khi có bucket | | |
+| `TELEMETRY_S3_BUCKET` | — | Bucket. Có = bật upload |
+| `TELEMETRY_S3_PREFIX` | `telemetry` | Key: `<prefix>/<YYYY-MM-DD>/segment-<ts>-<instance>.jsonl.gz` |
+| `TELEMETRY_S3_REGION` | `AWS_REGION` | |
+| `TELEMETRY_S3_ENDPOINT` | — | S3 tương thích (RustFS, MinIO). Bỏ trống trên AWS |
+| `TELEMETRY_S3_FORCE_PATH_STYLE` | — | `true` cho RustFS/MinIO |
+| `TELEMETRY_S3_KEEP_LOCAL` | `false` | Giữ file local sau upload (đánh dấu `.uploaded`) |
+| `TELEMETRY_S3_UPLOAD_INTERVAL_MS` | `30000` | Chu kỳ quét + upload |
+| `TELEMETRY_S3_ORPHAN_AFTER_MS` | `3600000` | Segment của instance khác chỉ được upload khi bỏ không lâu hơn ngưỡng này |
+| **Forward** — tắt mặc định | | |
+| `TELEMETRY_FORWARD_ENABLED` | `false` | Đẩy OTLP ngay khi nhận |
+| `TELEMETRY_FORWARD_ENDPOINT` | `http://localhost:4318` | Base OTLP/HTTP (`/v1/traces`, `/v1/logs`, `/v1/metrics` tự thêm) |
+| `TELEMETRY_FORWARD_HEADERS` | — | `k1=v1,k2=v2` (vd `authorization=<ingestion key>` cho ClickStack có auth) |
+| `TELEMETRY_FORWARD_TIMEOUT_MS` | `5000` | |
+| `TELEMETRY_FORWARD_MAX_IN_FLIGHT` | `20` | Vượt thì bỏ (vẫn có file thô) |
 
-### Danh sách Tham số CLI Flags
+Credential S3 theo chuỗi mặc định của AWS SDK: ECS task role, `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, `~/.aws`.
 
-| Flag                   | Mặc định                           | Mô tả                           |
-| ---------------------- | ---------------------------------- | ------------------------------- |
-| `--date=YYYY-MM-DD`    | Ngày hiện tại                      | Ngày của thư mục log cần replay |
-| `--dir=PATH`           | `./telemetry-storage`              | Thư mục lưu trữ telemetry       |
-| `--target-traces=URL`  | `http://localhost:4318/v1/traces`  | OTLP Traces Receiver Endpoint   |
-| `--target-logs=URL`    | `http://localhost:4318/v1/logs`    | OTLP Logs Receiver Endpoint     |
-| `--target-metrics=URL` | `http://localhost:4318/v1/metrics` | OTLP Metrics Receiver Endpoint  |
+### `GET /health`
+Trả 200 + số liệu: `received`, `queue`, `s3.{uploaded,failed,pending,lastError}`, `forward.{forwarded,failed,dropped,lastError}`. Image có sẵn `HEALTHCHECK`.
 
-### Ví dụ lệnh chạy thực tế
+---
 
-**1. Replay dữ liệu hôm nay về SigNoz Local:**
+## ☁️ S3
+
+- Segment **đã đóng** (theo dung lượng, theo tuổi, sang ngày mới, hoặc khi tắt) được upload rồi **xoá local**. Segment đang ghi không bị đụng tới.
+- Upload lỗi → giữ file, lượt sau thử lại.
+- Nhiều instance chung một thư mục: mỗi instance chỉ upload segment **của chính nó**; segment của instance khác (đã chết) được nhận sau `TELEMETRY_S3_ORPHAN_AFTER_MS`. Muốn file sót của lần chạy trước được đẩy lên **ngay** khi khởi động lại (disk bền, docker compose), đặt `TELEMETRY_INSTANCE_ID` cố định — mặc định id có kèm pid nên đổi mỗi lần chạy.
+- SIGTERM → ghi nốt hàng đợi, đóng segment, upload hết rồi mới thoát.
+- **Dọn dữ liệu cũ**: stash không tự xoá trên S3 — đặt **lifecycle rule** cho prefix (vd chuyển Glacier sau 30 ngày, xoá sau 180 ngày).
+
+IAM tối thiểu:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    { "Effect": "Allow", "Action": ["s3:PutObject"], "Resource": "arn:aws:s3:::my-telemetry/telemetry/*" },
+    { "Effect": "Allow", "Action": ["s3:ListBucket"], "Resource": "arn:aws:s3:::my-telemetry",
+      "Condition": { "StringLike": { "s3:prefix": "telemetry/*" } } },
+    { "Effect": "Allow", "Action": ["s3:GetObject"], "Resource": "arn:aws:s3:::my-telemetry/telemetry/*" }
+  ]
+}
+```
+(`ListBucket` + `GetObject` chỉ cần cho replay; task role của stash chỉ cần `PutObject`.)
+
+## ☁️ ECS — chạy sidecar
+
+Mỗi task: app + stash, nói chuyện qua `localhost` (awsvpc chung network namespace — HTTP thường là đủ, không ra card mạng).
+
+```jsonc
+"containerDefinitions": [
+  {
+    "name": "telemetry-stash",
+    "image": "<registry>/telemetry-stash:<version>",
+    "essential": false,                       // stash chết không kéo app chết theo
+    "memoryReservation": 128,
+    "environment": [
+      { "name": "TELEMETRY_HOST", "value": "127.0.0.1" },
+      { "name": "TELEMETRY_S3_BUCKET", "value": "my-telemetry" },
+      { "name": "TELEMETRY_S3_PREFIX", "value": "telemetry/sitter-service-api" }
+    ],
+    "healthCheck": { "command": ["CMD-SHELL", "wget -qO- http://127.0.0.1:3301/health || exit 1"] },
+    "stopTimeout": 30
+  },
+  {
+    "name": "api",
+    "environment": [{ "name": "LOG_OBSERVE_ENDPOINT", "value": "http://localhost:3301" }],
+    "dependsOn": [{ "containerName": "telemetry-stash", "condition": "HEALTHY" }]
+  }
+]
+```
+
+- `dependsOn` còn quyết định **thứ tự tắt**: ECS dừng `api` trước, stash sau → stash nhận đủ batch cuối của Observe rồi mới upload + thoát.
+- Ổ đĩa task (Fargate) mất khi task bị thay → dữ liệu bền nằm ở S3; segment ngắn (5 phút mặc định) giới hạn phần có thể mất khi task bị kill cứng.
+- Prefix theo service giúp replay riêng từng service.
+
+---
+
+## 🔄 Replay
 
 ```bash
+npx telemetry-stash-replay --help
+
+# local, hôm nay → ClickStack/collector ở localhost:4318
 npx telemetry-stash-replay
 
+# ngày cụ thể, thư mục khác, collector khác
+npx telemetry-stash-replay --date=2026-11-19 --dir=./my-stash --endpoint=http://10.0.0.5:4318
+
+# từ S3 (credential: chuỗi mặc định của AWS SDK)
+npx telemetry-stash-replay --s3=s3://my-telemetry/telemetry/sitter-service-api --date=2026-11-19
+
+# S3 tương thích (RustFS/MinIO) + collector cần key
+npx telemetry-stash-replay --s3=s3://bucket/prefix --s3-endpoint=http://localhost:9000 --s3-path-style \
+  --header=authorization=<ingestion-key>
 ```
 
-**2. Replay dữ liệu theo ngày chỉ định:**
+Segment bị cụt (process bị kill giữa lúc ghi) vẫn replay được phần còn nguyên.
 
-```bash
-npx telemetry-stash-replay --date=2026-09-04
-
-```
-
-**3. Replay từ thư mục đĩa tùy chỉnh:**
-
-```bash
-npx telemetry-stash-replay --dir=./my-stash-folder --date=2026-09-04
-
-```
-
-**4. Replay lên SigNoz Server từ xa:**
-
-```bash
-npx telemetry-stash-replay \
-  --date=2026-09-04 \
-  --target-traces=[http://192.168.1.100:4318/v1/traces](http://192.168.1.100:4318/v1/traces) \
-  --target-logs=[http://192.168.1.100:4318/v1/logs](http://192.168.1.100:4318/v1/logs) \
-  --target-metrics=[http://192.168.1.100:4318/v1/metrics](http://192.168.1.100:4318/v1/metrics)
-
-```
-
----
-
-## 📁 Cấu trúc lưu trữ dữ liệu
-
-Dữ liệu sẽ tự động phân loại theo từng ngày:
+## 📁 Cấu trúc lưu trữ
 
 ```text
-telemetry-storage/
-└── 2026-09-04/
-    ├── raw-payloads.jsonl.gz    # Dữ liệu Gzip thô siêu nhẹ (dùng để Replay)
-    ├── readable-traces.jsonl    # (Nếu bật readable: true) Dữ liệu OTLP Traces
-    ├── readable-logs.jsonl      # (Nếu bật readable: true) Dữ liệu OTLP Logs
-    └── readable-metrics.jsonl   # (Nếu bật readable: true) Dữ liệu OTLP Metrics
-
+telemetry-storage/                         (S3: <prefix>/<YYYY-MM-DD>/...)
+└── 2026-11-19/
+    ├── segment-1795056641595-api-1.jsonl.gz   # payload thô (mỗi dòng 1 batch + _receivedAt), dùng để replay
+    ├── readable-traces.jsonl                  # (readable) OTLP traces
+    ├── readable-logs.jsonl                    # (readable) OTLP logs
+    └── readable-metrics.jsonl                 # (readable) OTLP metrics
 ```
+
+## 📊 Dashboard ClickStack
+
+`node clickstack/dashboard.mjs` tạo / cập nhật dashboard "NestJS Observe" (requests, endpoint, DB/HTTP calls, jobs, runtime, logs, custom metrics) — xem đầu file để đổi API/tên.
+
+## 🧪 Demo
+
+`demo/` (không commit) là app NestJS 12 + Postgres + BullMQ dùng `@nestjs/observe` thật để kiểm thử transformer: `npm run infra:up && npm start`, rồi `npm run simulate && npm run check`.
