@@ -26,6 +26,21 @@ export const activeOptions: StashOptions = {
   maxSegmentSizeBytes: DEFAULT_MAX_SEGMENT_SIZE,
 };
 
+/**
+ * Chèn `"_receivedAt": <ms>` vào đầu object JSON mà không parse (chỉ nối chuỗi),
+ * để replay có mốc thời gian cho runtime metrics (payload Observe không mang timestamp cho phần này).
+ */
+export function withReceivedAt(buffer: Buffer, receivedAt: number): Buffer {
+  const text = buffer.toString("utf-8").trim();
+  if (!text.startsWith("{")) return buffer;
+  const rest = text.slice(1).trimStart();
+  const field = `"_receivedAt":${receivedAt}`;
+  return Buffer.from(
+    rest.startsWith("}") ? `{${field}${rest}` : `{${field},${rest}`,
+    "utf-8",
+  );
+}
+
 export function updateStashOptions(options: StashOptions) {
   Object.assign(activeOptions, options);
 
@@ -89,10 +104,11 @@ export function startCollectorServer(options?: StashOptions): Server {
       if (res.writableEnded) return;
 
       try {
-        let buffer = Buffer.concat(chunks);
+        let buffer: Buffer = Buffer.concat(chunks);
         if (req.headers["content-encoding"] === "gzip" || buffer[0] === 0x1f) {
           buffer = gunzipSync(buffer);
         }
+        buffer = withReceivedAt(buffer, Date.now());
 
         // 1. Enqueue Async Segmented Writer (Non-blocking)
         if (activeOptions.raw !== false && writerInstance) {

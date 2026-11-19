@@ -2,20 +2,16 @@
 import { replayStash } from "../src/replay/otlp.sender.js";
 
 const args = process.argv.slice(2);
-const dateArg = args.find((a) => a.startsWith("--date="))?.split("=")[1];
-const dirArg = args.find((a) => a.startsWith("--dir="))?.split("=")[1];
-const tracesArg = args
-  .find((a) => a.startsWith("--target-traces="))
-  ?.split("=")[1];
-const logsArg = args.find((a) => a.startsWith("--target-logs="))?.split("=")[1];
-const metricsArg = args
-  .find((a) => a.startsWith("--target-metrics="))
-  ?.split("=")[1];
+// Lấy phần sau dấu "=" đầu tiên (URL có query string cũng chứa "=").
+const flag = (name: string) => {
+  const arg = args.find((a) => a.startsWith(`--${name}=`));
+  return arg ? arg.slice(name.length + 3) : undefined;
+};
 
 replayStash({
-  date: dateArg,
-  storageDir: dirArg,
-  targetTracesUrl: tracesArg,
-  targetLogsUrl: logsArg,
-  targetMetricsUrl: metricsArg,
+  date: flag("date"),
+  storageDir: flag("dir"),
+  targetTracesUrl: flag("target-traces"),
+  targetLogsUrl: flag("target-logs"),
+  targetMetricsUrl: flag("target-metrics"),
 }).catch((err) => console.error("Replay failed:", err));

@@ -1,5 +1,24 @@
-const toHex = (uuid?: string, len?: number): string =>
-  uuid ? uuid.replace(/-/g, "").slice(0, len) : "";
+import {
+  OtlpAttribute,
+  msToNs,
+  parseTimeMs,
+  pushAttr,
+  pushAttrs,
+  syntheticSpanId,
+  toSpanId,
+  toTraceId,
+} from "./otlp.util.js";
+
+// OTLP SpanKind / StatusCode
+const KIND_INTERNAL = 1;
+const KIND_SERVER = 2;
+const KIND_CLIENT = 3;
+const KIND_CONSUMER = 5;
+const STATUS_UNSET = 0;
+const STATUS_ERROR = 2;
+
+/** Tag của các span gọi ra ngoài mà Observe tự ghi (fetch/http, pg/mysql/mongo, LLM). */
+const CLIENT_TAG_PREFIXES = ["http.", "url.", "db.", "llm.", "rpc.", "messaging."];
 
 function formatCodeFrames(frames: any[]): string {
   if (!Array.isArray(frames) || frames.length === 0) return "";
@@ -7,20 +26,24 @@ function formatCodeFrames(frames: any[]): string {
     .map((f) => {
       if (!f) return "";
       const filePath =
-        f.filePath || f.file || f.filename || f.fileName || f.path || "unknown";
-      const lineNum = f.lineNumber ?? f.line ?? f.lineNo ?? f.ln ?? "?";
-      const colNum = f.columnNumber ?? f.column ?? f.col ?? "?";
+        f.file || f.filePath || f.filename || f.fileName || f.path || "unknown";
+      const lineNum = f.line ?? f.lineNumber ?? f.lineNo ?? f.ln ?? "?";
+      const colNum = f.column ?? f.columnNumber ?? f.col;
 
       let linesText = "";
       if (Array.isArray(f.lines)) {
+        const first = typeof f.firstLine === "number" ? f.firstLine : undefined;
         linesText = f.lines
-          .map((l: any) => {
-            if (typeof l === "string") return `   | ${l}`;
+          .map((l: any, i: number) => {
+            if (typeof l === "string") {
+              const no = first !== undefined ? first + i : undefined;
+              const isError = no !== undefined && no === lineNum;
+              return `${isError ? "❌ " : "   "}${String(no ?? "").padStart(4, " ")} | ${l}`;
+            }
             const isError =
               l.isErrorLine || l.isError || l.highlight || l.active || l.error;
             const line = l.line ?? l.lineNumber ?? l.lineNo ?? l.ln ?? "";
-            const content =
-              l.content ?? l.text ?? l.code ?? l.lineContent ?? "";
+            const content = l.content ?? l.text ?? l.code ?? l.lineContent ?? "";
             return `${isError ? "❌ " : "   "}${String(line).padStart(4, " ")} | ${content}`;
           })
           .join("\n");
@@ -29,134 +52,81 @@ function formatCodeFrames(frames: any[]): string {
       }
 
       if (filePath === "unknown" && !linesText) return "";
-      return `\n---------------- [ SOURCE CODE FRAME ] ----------------\n📁 ${filePath}:${lineNum}:${colNum}\n${linesText}`;
+      const loc = colNum !== undefined ? `${lineNum}:${colNum}` : `${lineNum}`;
+      return `\n---------------- [ SOURCE CODE FRAME ] ----------------\n📁 ${filePath}:${loc}\n${linesText}`;
     })
     .filter(Boolean)
     .join("\n");
 }
 
-export function flattenSpans(
-  nodes: any[],
-  traceIdHex: string,
-  parentSpanHex: string,
-  baseNs: bigint,
-  snapshotError: any,
-  snapshotAttr: any,
-  snapshotDuration?: number,
-  spans: any[] = [],
-  isJob: boolean = false,
-): any[] {
-  if (!Array.isArray(nodes)) return spans;
+function exceptionEvent(err: any, timeNs: bigint) {
+  const attributes: OtlpAttribute[] = [];
+  pushAttr(attributes, "exception.type", err?.cls || err?.name || "Error");
+  pushAttr(attributes, "exception.message", err?.message || "Error");
+  const stack = (err?.stack || "") + formatCodeFrames(err?.codeFrames || []);
+  pushAttr(attributes, "exception.stacktrace", stack);
+  return { timeUnixNano: timeNs.toString(), name: "exception", attributes };
+}
 
-  for (let i = 0; i < nodes.length; i++) {
-    const node = nodes[i];
-    const isRootSpan = !parentSpanHex && i === 0;
+const errorMessage = (err: any) =>
+  typeof err === "object" && err !== null
+    ? err.message || "Error"
+    : String(err || "Error");
 
-    const spanHex = toHex(node.s, 16);
-    const startOffsetMs = node.so || 0;
-    const durationMs =
-      isRootSpan && snapshotDuration !== undefined
-        ? snapshotDuration
-        : node.d || 0;
+function splitUrl(url?: string): { path?: string; query?: string } {
+  if (!url) return {};
+  const i = url.indexOf("?");
+  return i === -1 ? { path: url } : { path: url.slice(0, i), query: url.slice(i + 1) };
+}
 
-    const startNs = baseNs + BigInt(Math.round(startOffsetMs * 1e6));
-    const endNs = startNs + BigInt(Math.round(durationMs * 1e6));
+interface FlattenCtx {
+  traceId: string;
+  baseNs: bigint;
+  snapshotError: any;
+  spans: any[];
+  seed: string;
+}
 
-    const attributes: any[] = [
-      { key: "code.namespace", value: { stringValue: node.c || "" } },
-      { key: "code.function", value: { stringValue: node.m || "" } },
-    ];
+/** Biến cây node (`t`) của Observe thành span con của `parentSpanId`. */
+function flattenNodes(nodes: any[], parentSpanId: string, ctx: FlattenCtx, path: string) {
+  if (!Array.isArray(nodes)) return;
 
-    let spanName = `${node.c}.${node.m}`;
-    let spanKind = 1;
+  nodes.forEach((node, i) => {
+    if (!node) return;
+    const nodePath = `${path}.${i}`;
+    const spanId = node.s ? toSpanId(node.s) : syntheticSpanId(`${ctx.seed}${nodePath}`);
+    const startNs = ctx.baseNs + msToNs(Number(node.so) || 0);
+    const endNs = startNs + msToNs(Number(node.d) || 0);
 
-    if (isRootSpan) {
-      spanKind = 2;
-      if (isJob) {
-        spanName = `JOB ${snapshotAttr?.queueName || ""}/${snapshotAttr?.name || node.m}`;
-        if (snapshotAttr?.queueName)
-          attributes.push({
-            key: "messaging.destination",
-            value: { stringValue: snapshotAttr.queueName },
-          });
-        if (snapshotAttr?.status)
-          attributes.push({
-            key: "job.status",
-            value: { stringValue: snapshotAttr.status },
-          });
-        if (snapshotAttr?.id)
-          attributes.push({
-            key: "job.id",
-            value: { stringValue: snapshotAttr.id },
-          });
-      } else {
-        const method = snapshotAttr?.m || "GET";
-        const statusCode =
-          snapshotAttr?.sc || (snapshotError || node.e ? 500 : 200);
-        const targetUrl = snapshotAttr?.ou || `/${node.m}`;
+    const tags = node.t && typeof node.t === "object" ? node.t : undefined;
+    const isClient =
+      !!tags && Object.keys(tags).some((k) => CLIENT_TAG_PREFIXES.some((p) => k.startsWith(p)));
 
-        spanName = `${method} ${targetUrl}`;
-        attributes.push(
-          { key: "http.method", value: { stringValue: method } },
-          { key: "http.target", value: { stringValue: targetUrl } },
-          { key: "http.status_code", value: { intValue: Number(statusCode) } },
-        );
-      }
-    }
+    const attributes: OtlpAttribute[] = [];
+    pushAttr(attributes, "code.namespace", node.c);
+    pushAttr(attributes, "code.function", node.m);
+    pushAttr(attributes, "observe.origin", node.o);
+    pushAttrs(attributes, tags);
 
     const events: any[] = [];
-    let status: { code: number; message?: string } = { code: 1 };
-    const errorObj =
+    let status: { code: number; message?: string } = { code: STATUS_UNSET };
+    const err =
       typeof node.e === "object" && node.e !== null
         ? node.e
         : node.e
-          ? snapshotError
+          ? ctx.snapshotError || true
           : null;
-
-    if (errorObj) {
-      status = {
-        code: 2,
-        message:
-          typeof errorObj === "object"
-            ? errorObj.message || "Error"
-            : String(errorObj),
-      };
-
-      if (!isRootSpan && !isJob)
-        attributes.push({ key: "http.status_code", value: { intValue: 500 } });
-
-      if (typeof errorObj === "object") {
-        const formattedCodeFrames = formatCodeFrames(errorObj.codeFrames || []);
-        const fullStack = (errorObj.stack || "") + formattedCodeFrames;
-
-        attributes.push({
-          key: "exception.stacktrace",
-          value: { stringValue: fullStack },
-        });
-        events.push({
-          timeUnixNano: endNs.toString(),
-          name: "exception",
-          attributes: [
-            {
-              key: "exception.type",
-              value: { stringValue: errorObj.cls || "Error" },
-            },
-            {
-              key: "exception.message",
-              value: { stringValue: errorObj.message || "Error" },
-            },
-            { key: "exception.stacktrace", value: { stringValue: fullStack } },
-          ],
-        });
-      }
+    if (err) {
+      status = { code: STATUS_ERROR, message: errorMessage(err) };
+      if (typeof err === "object") events.push(exceptionEvent(err, endNs));
     }
 
-    spans.push({
-      traceId: traceIdHex,
-      spanId: spanHex,
-      parentSpanId: parentSpanHex || undefined,
-      name: spanName,
-      kind: spanKind,
+    ctx.spans.push({
+      traceId: ctx.traceId,
+      spanId,
+      parentSpanId,
+      name: node.n || (isClient ? node.m : `${node.c}.${node.m}`),
+      kind: isClient ? KIND_CLIENT : KIND_INTERNAL,
       startTimeUnixNano: startNs.toString(),
       endTimeUnixNano: endNs.toString(),
       attributes,
@@ -164,19 +134,150 @@ export function flattenSpans(
       status,
     });
 
-    if (node.ch && node.ch.length > 0) {
-      flattenSpans(
-        node.ch,
-        traceIdHex,
-        spanHex,
-        baseNs,
-        snapshotError,
-        snapshotAttr,
-        undefined,
-        spans,
-        isJob,
-      );
+    if (Array.isArray(node.ch) && node.ch.length > 0) {
+      flattenNodes(node.ch, spanId, ctx, nodePath);
     }
+  });
+}
+
+/**
+ * Một request snapshot (HTTP/RPC/GraphQL/WS) → span gốc SERVER tổng hợp + các span con.
+ * Observe gửi `t` là danh sách span ngang hàng (Guard, Controller...) không có gốc,
+ * nên gốc được dựng từ thông tin của snapshot.
+ */
+export function buildRequestSpans(snapshot: any, fallbackTimeMs: number): any[] {
+  const traceId = toTraceId(snapshot.ti);
+  if (!traceId) return [];
+
+  const startMs = parseTimeMs(snapshot.ct) ?? parseTimeMs(snapshot.c) ?? fallbackTimeMs;
+  const baseNs = msToNs(startMs);
+  const durationMs = Number(snapshot.d) || 0;
+  const endNs = baseNs + msToNs(durationMs);
+  const a = snapshot.a || {};
+  // Nhiều snapshot có thể chung traceId (request A gọi request B, Observe chuyển trace id qua
+  // x-request-id) → seed thêm thời điểm + URL + span con đầu tiên để root không trùng.
+  const seed = `req:${snapshot.ti}|${snapshot.ct ?? ""}|${a.m ?? ""}|${a.ou ?? ""}|${snapshot.t?.[0]?.s ?? ""}`;
+  const rootId = syntheticSpanId(seed);
+
+  const protocol = snapshot.p || "http";
+  const method = a.m;
+  const { path, query } = splitUrl(a.ou);
+  const route = snapshot.op || path;
+  const statusCode = a.sc !== undefined ? Number(a.sc) : undefined;
+
+  const name =
+    protocol === "http"
+      ? `${method || "HTTP"} ${route || "/"}`
+      : `${protocol} ${route || method || "operation"}`;
+
+  const attributes: OtlpAttribute[] = [];
+  pushAttr(attributes, "observe.protocol", protocol);
+  if (protocol === "http") {
+    pushAttr(attributes, "http.request.method", method);
+    pushAttr(attributes, "http.route", snapshot.op);
+    pushAttr(attributes, "url.path", path);
+    pushAttr(attributes, "url.query", query);
+    pushAttr(attributes, "http.response.status_code", statusCode);
+    // Tên cũ (semconv < 1.20) để dashboard cũ vẫn chạy
+    pushAttr(attributes, "http.method", method);
+    pushAttr(attributes, "http.target", a.ou);
+    pushAttr(attributes, "http.status_code", statusCode);
+  } else {
+    pushAttr(attributes, "observe.operation", snapshot.op);
+    pushAttrs(attributes, a, "observe.attr.");
   }
+  pushAttr(attributes, "user.id", snapshot.u);
+  pushAttrs(attributes, snapshot.tg);
+  if (snapshot.rq && typeof snapshot.rq === "object") {
+    const { headers, body, ...rest } = snapshot.rq;
+    pushAttrs(attributes, headers, "http.request.header.");
+    pushAttr(attributes, "http.request.body", body);
+    pushAttrs(attributes, rest, "observe.request.");
+  }
+
+  const events: any[] = [];
+  let status: { code: number; message?: string } = { code: STATUS_UNSET };
+  // Semconv: span SERVER chỉ ERROR khi 5xx; 4xx là lỗi phía client → để UNSET
+  // (vẫn giữ event exception để xem chi tiết). Không có status code thì theo `e`.
+  const isServerError =
+    statusCode !== undefined ? statusCode >= 500 : !!snapshot.e;
+  if (isServerError) {
+    status = {
+      code: STATUS_ERROR,
+      message: snapshot.e ? errorMessage(snapshot.e) : `HTTP ${statusCode}`,
+    };
+  }
+  if (snapshot.e && typeof snapshot.e === "object") {
+    events.push(exceptionEvent(snapshot.e, endNs));
+  }
+
+  const spans: any[] = [
+    {
+      traceId,
+      spanId: rootId,
+      name,
+      kind: KIND_SERVER,
+      startTimeUnixNano: baseNs.toString(),
+      endTimeUnixNano: endNs.toString(),
+      attributes,
+      events,
+      status,
+    },
+  ];
+  flattenNodes(snapshot.t || [], rootId, {
+    traceId,
+    baseNs,
+    snapshotError: snapshot.e,
+    spans,
+    seed,
+  }, "");
+  return spans;
+}
+
+/** Một job snapshot (queue/cron/interval) → span gốc CONSUMER tổng hợp + các span con. */
+export function buildJobSpans(job: any, fallbackTimeMs: number): any[] {
+  const traceId = toTraceId(job.ti);
+  if (!traceId) return [];
+
+  const startMs = parseTimeMs(job.c) ?? parseTimeMs(job.ct) ?? fallbackTimeMs;
+  const baseNs = msToNs(startMs);
+  const endNs = baseNs + msToNs(Number(job.d) || 0);
+  // Job enqueue từ request dùng chung traceId với request → seed thêm job id.
+  const seed = `job:${job.ti}:${job.i ?? ""}`;
+  const rootId = syntheticSpanId(seed);
+
+  const attributes: OtlpAttribute[] = [];
+  pushAttr(attributes, "messaging.destination.name", job.q);
+  pushAttr(attributes, "messaging.destination", job.q); // tên cũ
+  pushAttr(attributes, "job.id", job.i);
+  pushAttr(attributes, "job.name", job.n);
+  pushAttr(attributes, "job.status", job.s);
+  pushAttr(attributes, "job.enqueued_at", job.ea);
+  pushAttr(attributes, "job.wait_ms", job.wd);
+  pushAttr(attributes, "job.attempts", job.am);
+  pushAttr(attributes, "job.max_attempts", job.ma);
+  pushAttrs(attributes, job.tg);
+
+  const events: any[] = [];
+  let status: { code: number; message?: string } = { code: STATUS_UNSET };
+  if (job.e || job.s === "failed") {
+    status = { code: STATUS_ERROR, message: errorMessage(job.e || "Job failed") };
+    if (typeof job.e === "object" && job.e) events.push(exceptionEvent(job.e, endNs));
+  }
+
+  const spans: any[] = [
+    {
+      traceId,
+      spanId: rootId,
+      name: `JOB ${job.q || "job"}/${job.n || "unknown"}`,
+      kind: KIND_CONSUMER,
+      startTimeUnixNano: baseNs.toString(),
+      endTimeUnixNano: endNs.toString(),
+      attributes,
+      events,
+      status,
+    },
+  ];
+  flattenNodes(job.t || [], rootId, { traceId, baseNs, snapshotError: job.e, spans, seed }, "");
   return spans;
 }
